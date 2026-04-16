@@ -1,0 +1,22 @@
+{
+    "name": "pfranco/golampi",
+    "description": "Compilador Golampi - Arquitectura 1 USAC",
+    "type": "project",
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "require": {
+        "php": ">=8.0",
+        "antlr/antlr4-php-runtime": "^0.9.1"
+    },
+    "autoload": {
+        "psr-4": {
+           "App\\": "src/Backend/"        
+        }
+    },
+    "authors": [
+        {
+          "name": "Pablo Alejandro",
+            "email": "98234831+Dr-Nerdjoy@users.noreply.github.com"
+        }
+    ]
+}

@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Probar Gramática Golampi",
+            "type": "antlr-debug",
+            "request": "launch",
+            "input": "${workspaceFolder}/tests/prueba1.gpi",
+            "grammar": "${workspaceFolder}/grammar/golampi.g4",
+            "startRule": "program",
+            "printParseTree": true,
+            "visualParseTree": true
+        }
+    ]
+}

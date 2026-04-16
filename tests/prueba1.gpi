@@ -1,0 +1,19 @@
+// Prueba 1: Declaraciones y Tipos
+func main() {
+    /* Prueba de declaración larga 
+       y múltiple 
+    */
+    var a int32
+    var b, c float32 = 1.5, 2.0
+    
+    // Constantes obligatorias
+    const pi float32 = 3.14
+    
+    // Declaración corta (inferencia)
+    x, y := true, false
+    
+    // Tipos de texto y valor nulo
+    var texto string = "USAC 2026"
+    var letra rune = 'A'
+    var vacio int32 = nil
+}
