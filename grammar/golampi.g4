@@ -56,7 +56,6 @@ block : '{' statement* '}' ;
 
 // ==========================================
 // SENTENCIAS GENERALES 
-// (¡Corregido el error: todas las opciones tienen etiqueta!)
 // ==========================================
 statement : varDecl                                      # VarDeclStmt
           | constDecl                                    # ConstDeclStmt
