@@ -518,6 +518,16 @@ interface golampiVisitor extends ParseTreeVisitor
 	public function visitLogicalAnd(Context\LogicalAndContext $context);
 
 	/**
+	 * Visit a parse tree produced by the `NestedArrayLiteral` labeled alternative
+	 * in {@see golampiParser::expr()}.
+	 *
+	 * @param Context\NestedArrayLiteralContext $context The parse tree.
+	 *
+	 * @return mixed The visitor result.
+	 */
+	public function visitNestedArrayLiteral(Context\NestedArrayLiteralContext $context);
+
+	/**
 	 * Visit a parse tree produced by the `AddressOf` labeled alternative
 	 * in {@see golampiParser::expr()}.
 	 *

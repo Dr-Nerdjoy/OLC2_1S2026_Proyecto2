@@ -34,7 +34,7 @@ shortVarDecl : idList ':=' exprList ';'? ;
 constDecl : 'const' ID type '=' expr ';'? ;
 
 idList : ID (',' ID)* ;
-exprList : expr (',' expr)* ;
+exprList : expr (',' expr)* ','?;
 
 // ==========================================
 // 3.3.12. Funciones y parámetros 
@@ -100,6 +100,7 @@ defaultClause : 'default' ':' statement* ;
 // 3.3.4. Valor nil
 // ==========================================
 expr : type '{' exprList? '}'                 # ArrayLiteral
+     | '{' exprList? '}'                      # NestedArrayLiteral
      | expr '[' expr ']'                      # IndexAccess
      | expr '(' exprList? ')'                 # FuncCall
      | '&' expr                               # AddressOf

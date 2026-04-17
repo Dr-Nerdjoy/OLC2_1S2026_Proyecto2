@@ -592,6 +592,17 @@ class golampiBaseVisitor extends AbstractParseTreeVisitor implements golampiVisi
 	 * The default implementation returns the result of calling
 	 * {@see self::visitChildren()} on `context`.
 	 */
+	public function visitNestedArrayLiteral(Context\NestedArrayLiteralContext $context)
+	{
+	    return $this->visitChildren($context);
+	}
+
+	/**
+	 * {@inheritdoc}
+	 *
+	 * The default implementation returns the result of calling
+	 * {@see self::visitChildren()} on `context`.
+	 */
 	public function visitAddressOf(Context\AddressOfContext $context)
 	{
 	    return $this->visitChildren($context);
