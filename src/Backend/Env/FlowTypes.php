@@ -2,23 +2,33 @@
 
 namespace App\Env;
 
-class FlowType {
-    public function __toString() { return "FlowType"; }
-}
-
-class ContinueType extends FlowType {
-    public function __toString() { return "ContinueType"; }
-}
-
-class BreakType extends FlowType {
-    public function __toString() { return "BreakType"; }
-}
-
-class ReturnType extends \App\Custom\FlowType
+/** Señal de control de flujo base */
+class FlowType
 {
-    public $retVal;
-    public function __construct($retVal = null) {
+    public function __toString(): string { return 'FlowType'; }
+}
+
+/** Señal de continue */
+class ContinueType extends FlowType
+{
+    public function __toString(): string { return 'ContinueType'; }
+}
+
+/** Señal de break */
+class BreakType extends FlowType
+{
+    public function __toString(): string { return 'BreakType'; }
+}
+
+/** Señal de return con valor opcional */
+class ReturnType extends FlowType
+{
+    public mixed $retVal;
+
+    public function __construct(mixed $retVal = null)
+    {
         $this->retVal = $retVal;
     }
-    public function __toString() { return "ReturnType"; }
+
+    public function __toString(): string { return 'ReturnType'; }
 }
