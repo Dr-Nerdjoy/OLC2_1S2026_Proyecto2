@@ -66,7 +66,7 @@ try {
     $compiler->visit($tree);
 
     $asmCode        = $compiler->getASM()->toString();
-    $symTableHtml   = $compiler->getSymbolTable()->toHtml();
+    $symTableHtml   = $compiler->getTablaSimbolos()->toHtml();
     $semanticErrors = $compiler->getSemanticErrors();
 
     // 7. Devolver respuesta
