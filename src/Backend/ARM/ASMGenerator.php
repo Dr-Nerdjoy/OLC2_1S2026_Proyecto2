@@ -22,6 +22,10 @@ class ASMGenerator
     private array $floats = [];
     private int   $fltCount = 0;
 
+    /** Arreglos reservados en .bss: label => count (número de elementos) */
+    private array $bssArrays = [];
+    private int   $arrCount  = 0;
+
     /** Pool de temporales enteros (x9–x15) */
     private array $freeInt   = ['x9','x10','x11','x12','x13','x14','x15'];
     private array $usedInt   = [];
@@ -102,6 +106,17 @@ class ASMGenerator
         return $label;
     }
 
+    /**
+     * Reserva espacio para un arreglo de $count elementos de 8 bytes en .bss.
+     * Devuelve la etiqueta para acceder a él con adrp/ldr/str.
+     */
+    public function reserveArray(int $count): string
+    {
+        $label = 'arr_' . $this->arrCount++;
+        $this->bssArrays[$label] = $count;
+        return $label;
+    }
+
     // -------------------------------------------------------
     // Emisión de instrucciones
     // -------------------------------------------------------
@@ -170,6 +185,8 @@ class ASMGenerator
     public function endProgram(): void
     {
         $this->comment("exit(0)");
+        // Etiqueta destino de cualquier 'return' en main
+        $this->body[] = "__program_end:";
         $this->body[] = "    mov x0, #0";
         $this->body[] = "    mov x8, #93";
         $this->body[] = "    svc #0";
@@ -266,6 +283,17 @@ class ASMGenerator
         // Floats del programa
         foreach ($this->floats as $label => $val) {
             $out .= "{$label}: .float {$val}\n";
+        }
+
+
+
+        // ---- .bss (arreglos) ----------------------------------------
+        if (!empty($this->bssArrays)) {
+            $out .= "\n.section .bss\n";
+            foreach ($this->bssArrays as $label => $count) {
+                $bytes = $count * 8;
+                $out .= "{$label}: .skip {$bytes}\n";
+            }
         }
 
         // ---- .text ----------------------------------------
@@ -367,13 +395,30 @@ class ASMGenerator
         $r .= "    ldp x29, x30, [sp], #16\n";
         $r .= "    ret\n\n";
 
-        // ---- __print_float : float en s0  ----
+        // ---- __print_float : float en s0 (versión simplificada) ----
         $r .= "__print_float:\n";
         $r .= "    stp x29, x30, [sp, #-16]!\n";
         $r .= "    mov x29, sp\n";
         $r .= "    fcvtzs x0, s0\n";
         $r .= "    bl  __print_int\n";
         $r .= "    ldp x29, x30, [sp], #16\n";
+        $r .= "    ret\n\n";
+
+        // ---- __strlen : longitud de string en x0, resultado en x0 ----
+        $r .= "__strlen:\n";
+        $r .= "    stp x29, x30, [sp, #-32]!\n";
+        $r .= "    mov x29, sp\n";
+        $r .= "    str x19, [sp, #16]\n";
+        $r .= "    mov x19, x0\n";       // puntero al string
+        $r .= "    mov x0, #0\n";        // contador
+        $r .= "__sl_loop:\n";
+        $r .= "    ldrb w2, [x19, x0]\n";
+        $r .= "    cbz w2, __sl_done\n";
+        $r .= "    add x0, x0, #1\n";
+        $r .= "    b __sl_loop\n";
+        $r .= "__sl_done:\n";
+        $r .= "    ldr x19, [sp, #16]\n";
+        $r .= "    ldp x29, x30, [sp], #32\n";
         $r .= "    ret\n\n";
 
         // ---- Dato auxiliar ----

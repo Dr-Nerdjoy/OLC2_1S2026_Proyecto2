@@ -2,44 +2,54 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Golampi Compiler</title>
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <header class="toolbar">
-        <div class="logo">⚙ Golampi Compiler</div>
-        <nav class="actions">
-            <button id="btn-nuevo">Nuevo</button>
-            <button id="btn-cargar">Cargar</button>
-            <button id="btn-guardar">Guardar</button>
-            <button id="btn-compilar" class="primary">Compilar</button>
-            <button id="btn-limpiar-consola" class="danger">Limpiar Consola</button>
-        </nav>
-        <!-- Input oculto para cargar archivos -->
-        <input type="file" id="file-input" accept=".gpi,.go,.txt" style="display:none;">
-    </header>
 
-    <main class="container">
-        <section class="editor-section">
-            <h3>Editor de Código – Golampi</h3>
+<header class="toolbar">
+    <div class="logo">Golampi Compiler</div>
+    <nav class="actions">
+        <button id="btn-nuevo">Nuevo</button>
+        <button id="btn-cargar">Cargar</button>
+        <button id="btn-guardar">Guardar</button>
+        <button id="btn-compilar" class="primary">▶ Compilar</button>
+        <button id="btn-limpiar-consola" class="danger">✕ Limpiar</button>
+    </nav>
+    <input type="file" id="file-input" accept=".gpi,.go,.txt" style="display:none">
+</header>
+
+<main class="container">
+
+    <section class="editor-section">
+
+        <div class="editor-wrap">
+            <span class="panel-label">Editor de Código – Golampi</span>
             <textarea id="code-editor" spellcheck="false">func main() {
     a := 1
     b := a + 2
     fmt.Println(b)
 }</textarea>
+        </div>
 
-            <h3>Consola – Código ARM64 Generado</h3>
-            <div id="console-output" class="console"></div>
-        </section>
+        <div class="console-wrap">
+            <span class="panel-label">Consola – Código ARM64 Generado</span>
+            <div id="console-output">Listo. Escribí tu programa y presioná <b>▶ Compilar</b>.</div>
+        </div>
 
-        <aside class="reports-section">
-            <h3>Reportes</h3>
-            <button id="view-errors"  class="report-btn error">⚠ Ver Errores</button>
-            <button id="view-symbols" class="report-btn symbol">☰ Ver Tabla de Símbolos</button>
-            <button id="download-arm" class="report-btn download">↓ Descargar ARM64</button>
-        </aside>
-    </main>
+    </section>
 
-    <script src="js/main.js"></script>
+    <aside class="reports-section">
+        <span class="panel-label">Reportes</span>
+        <button id="view-errors"  class="report-btn error">⚠ Ver Errores</button>
+        <button id="view-symbols" class="report-btn symbol">☰ Tabla de Símbolos</button>
+        <button id="download-arm" class="report-btn download">↓ Descargar ARM64</button>
+        <p class="reports-hint">Los reportes se generan<br>después de compilar.</p>
+    </aside>
+
+</main>
+
+<script src="js/main.js"></script>
 </body>
 </html>

@@ -9,6 +9,8 @@ class Result
     const BOOL   = "Bool";
     const STRING = "String";
     const RUNE   = "Rune";
+    const ARRAY  = "Array";
+    const PTR    = "Ptr";
     const NULO   = "null";
 
     public string  $tipo;
