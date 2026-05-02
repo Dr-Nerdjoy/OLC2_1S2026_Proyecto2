@@ -407,6 +407,12 @@ class Compiler extends golampiBaseVisitor
         $ids   = $ctx->idList()->ID();
         $exprs = $ctx->exprList()->expr();
 
+        // Caso especial: destructuring de múltiples retornos
+        // "a, b, c := f()" → 1 expr, N ids → leer x0, x1, x2 del retorno
+        if (count($ids) > 1 && count($exprs) === 1) {
+            return $this->visitShortVarDeclMultiReturn($ids, $exprs[0]);
+        }
+
         foreach ($ids as $i => $idToken) {
             $name = $idToken->getText();
             $line = $idToken->getSymbol()->getLine();
@@ -434,6 +440,50 @@ class Compiler extends golampiBaseVisitor
             }
 
             $this->env->guardar($name, $result);
+            $this->symTable->add($name, 'variable', $tipo, null, $line, $col);
+        }
+        return null;
+    }
+
+    /**
+     * Maneja "a, b, c := f()" donde f() devuelve múltiples valores.
+     * Después de la llamada, los retornos están en x0, x1, x2, x3.
+     */
+    private function visitShortVarDeclMultiReturn(array $ids, Context\ExprContext $callExpr): mixed
+    {
+        // Ejecutar la llamada (deja retornos en x0, x1, ...)
+        $this->visit($callExpr);
+
+        // Determinar tipos de retorno si es FuncCall conocida
+        $retTypes = ['int32', 'int32', 'int32', 'int32'];
+        if ($callExpr instanceof Context\FuncCallContext) {
+            $callee = $callExpr->expr()->getText();
+            $info   = $this->funcInfo[$callee] ?? [];
+            if (!empty($info['returnTypes'])) {
+                $retTypes = $info['returnTypes'];
+            }
+        }
+
+        foreach ($ids as $i => $idToken) {
+            $name = $idToken->getText();
+            $line = $idToken->getSymbol()->getLine();
+            $col  = $idToken->getSymbol()->getCharPositionInLine();
+
+            if ($this->env->existeLocal($name)) {
+                $this->semanticErrors[] = [
+                    'tipo' => 'Semántico',
+                    'descripcion' => "Identificador '$name' ya declarado en este ámbito.",
+                    'linea' => $line, 'columna' => $col,
+                ];
+                continue;
+            }
+
+            // Cada id recibe x0, x1, x2, x3 respectivamente
+            $tipo = $retTypes[$i] ?? 'int32';
+            $reg  = $this->asm->getFreeTemp();
+            $this->asm->rawLine("    mov {$reg}, x{$i}");
+
+            $this->env->guardar($name, Result::temp($this->goTypeToResultType($tipo), $reg));
             $this->symTable->add($name, 'variable', $tipo, null, $line, $col);
         }
         return null;
@@ -469,48 +519,101 @@ class Compiler extends golampiBaseVisitor
     // ═══════════════════════════════════════════════════════
 
     /**
-     * Aloca un arreglo en el stack y devuelve un Result cuyo valor
-     * es el registro que apunta a la base del arreglo.
-     * tipo puede ser "[5]int32", "[2][3]int32", etc.
+     * Parsea un tipo de arreglo "[2][3][4]int32" en sus dimensiones [2,3,4]
+     * y devuelve también el tipo base ("int32").
+     * @return array{0: int[], 1: string}
+     */
+    private function parseArrayType(string $tipo): array
+    {
+        $dims = [];
+        $rest = $tipo;
+        while (preg_match('/^\[(\d+)\](.*)$/', $rest, $m)) {
+            $dims[] = (int)$m[1];
+            $rest   = $m[2];
+        }
+        return [$dims, $rest];
+    }
+
+    /** Cantidad total de elementos en un arreglo multidimensional */
+    private function arrayTotalSize(array $dims): int
+    {
+        $t = 1;
+        foreach ($dims as $d) $t *= $d;
+        return $t;
+    }
+
+    /**
+     * Aloca un arreglo (1D, 2D, 3D, ...) en el stack.
+     * Layout en memoria: row-major (C-style).
+     * Para [2][3]: m[0][0],m[0][1],m[0][2], m[1][0],m[1][1],m[1][2]
      */
     private function allocArray(string $tipo, mixed $initExpr, string $name, int $line, int $col): Result
     {
-        // Parsear tamaño: "[5]int32" -> 5
-        preg_match('/\[(\d+)\]/', $tipo, $m);
-        $size   = isset($m[1]) ? (int)$m[1] : 1;
-        $bytes  = $size * 8;   // 8 bytes por elemento (64-bit)
-        // Alinear a 16 bytes
-        $frame  = (int)(ceil($bytes / 16) * 16);
+        [$dims, $baseType] = $this->parseArrayType($tipo);
+        $totalSize = $this->arrayTotalSize($dims);
+        $bytes     = $totalSize * 8;
+        $frame     = (int)(ceil($bytes / 16) * 16);
+        if ($frame < 16) $frame = 16;
 
-        // Reservar espacio en el stack
         $ptrReg = $this->asm->getFreeTemp();
         $this->asm->rawLine("    sub sp, sp, #{$frame}");
         $this->asm->rawLine("    mov {$ptrReg}, sp");
 
-        // Inicializar con ceros
-        for ($i = 0; $i < $size; $i++) {
-            $offset = $i * 8;
-            $this->asm->rawLine("    str xzr, [{$ptrReg}, #{$offset}]");
+        // Inicializar a cero
+        for ($i = 0; $i < $totalSize; $i++) {
+            $this->asm->rawLine("    str xzr, [{$ptrReg}, #" . ($i * 8) . "]");
         }
 
-        // Si hay inicializador: var b [3]int32 = [3]int32{1, 2, 3}
+        // Si hay literal de inicialización, lo desempacamos recursivamente
         if ($initExpr !== null) {
-            $litResult = $this->visit($initExpr);
-            // litResult->valor apunta a otro buffer temporal en el stack
-            // Copiamos elemento a elemento desde el literal al buffer alocado
-            if ($litResult instanceof Result) {
-                for ($i = 0; $i < $size; $i++) {
-                    $offset = $i * 8;
-                    $tmp = $this->asm->getFreeTemp();
-                    $this->asm->rawLine("    ldr {$tmp}, [{$litResult->valor}, #{$offset}]");
-                    $this->asm->rawLine("    str {$tmp}, [{$ptrReg}, #{$offset}]");
-                    $this->asm->freeTemp($tmp);
-                }
-                $this->asm->freeTemp($litResult->valor);
-            }
+            $this->emitArrayInit($ptrReg, $dims, $initExpr, 0);
         }
 
-        return Result::temp(Result::INT, $ptrReg);  // puntero base
+        return Result::temp(Result::INT, $ptrReg);
+    }
+
+    /**
+     * Recorre un literal (posiblemente anidado) y guarda los valores
+     * en la memoria apuntada por $basePtr en orden row-major.
+     * $offset es el desplazamiento inicial en bytes.
+     */
+    private function emitArrayInit(string $basePtr, array $dims, mixed $initExpr, int $offset): void
+    {
+        // ArrayLiteral o NestedArrayLiteral: tienen exprList()
+        $exprs = null;
+        if ($initExpr instanceof Context\ArrayLiteralContext) {
+            $exprs = $initExpr->exprList()?->expr() ?? [];
+        } elseif ($initExpr instanceof Context\NestedArrayLiteralContext) {
+            $exprs = $initExpr->exprList()?->expr() ?? [];
+        } else {
+            // No es literal — probablemente una expresión: la copiamos como puntero
+            return;
+        }
+
+        if (count($dims) === 1) {
+            // Caso base: arreglo 1D, todos los exprs son escalares
+            foreach ($exprs as $i => $expr) {
+                if ($i >= $dims[0]) break;
+                $val = $this->visit($expr);
+                if ($val instanceof Result) {
+                    $byteOffset = $offset + $i * 8;
+                    $this->asm->rawLine("    str {$val->valor}, [{$basePtr}, #{$byteOffset}]");
+                    if ($val->tipo !== Result::STRING) {
+                        $this->asm->freeTemp($val->valor);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Caso recursivo: cada expr es otro literal anidado
+        $subDims     = array_slice($dims, 1);
+        $subSize     = $this->arrayTotalSize($subDims) * 8;
+        foreach ($exprs as $i => $subExpr) {
+            if ($i >= $dims[0]) break;
+            $subOffset = $offset + $i * $subSize;
+            $this->emitArrayInit($basePtr, $subDims, $subExpr, $subOffset);
+        }
     }
 
     /** var b [3]int32 = [3]int32{1, 2, 3} */
@@ -562,11 +665,32 @@ class Compiler extends golampiBaseVisitor
         return Result::temp(Result::INT, $ptrReg);
     }
 
-    /** a[i] en lado derecho: carga el elemento */
+    /**
+     * a[i]: acceso a elemento. Para arreglos multidim, calculamos el stride
+     * basándonos en el tipo declarado de la variable raíz.
+     */
     public function visitIndexAccess(Context\IndexAccessContext $ctx): mixed
     {
-        $arrResult = $this->visit($ctx->expr(0));  // puntero base
-        $idxResult = $this->visit($ctx->expr(1));  // índice
+        // Identificar la variable raíz y la dimensión actual del acceso
+        // Caminando hacia abajo, contamos cuántos [..] estamos profundizando
+        $depth      = 0;
+        $rootCtx    = $ctx;
+        while ($rootCtx->expr(0) instanceof Context\IndexAccessContext) {
+            $depth++;
+            $rootCtx = $rootCtx->expr(0);
+        }
+        // Ahora rootCtx->expr(0) es el ID raíz del arreglo
+
+        $rootName = $rootCtx->expr(0)->getText();
+        $rootType = $this->lookupArrayType($rootName);
+        [$dims, $baseType] = $this->parseArrayType($rootType);
+
+        // Acceso anidado total = depth + 1 (esta dimensión)
+        $thisDim = $depth + 1;   // 1-indexed: si a[i], thisDim=1; a[i][j], thisDim=2
+        $totalDims = count($dims);
+
+        $arrResult = $this->visit($ctx->expr(0));   // puntero al sub-arreglo
+        $idxResult = $this->visit($ctx->expr(1));
 
         if (!($arrResult instanceof Result) || !($idxResult instanceof Result)) {
             return Result::buildVacio();
@@ -575,28 +699,77 @@ class Compiler extends golampiBaseVisitor
         $rd     = $this->asm->getFreeTemp();
         $offset = $this->asm->getFreeTemp();
 
-        // offset = índice * 8
-        $this->asm->rawLine("    mov {$offset}, #8");
+        // Calcular stride: si todavía quedan dimensiones internas, stride = producto
+        // de las dimensiones restantes * 8.
+        $stride = 8;
+        if ($thisDim < $totalDims) {
+            $remaining = array_slice($dims, $thisDim);
+            $stride    = $this->arrayTotalSize($remaining) * 8;
+        }
+
+        $this->asm->rawLine("    mov {$offset}, #{$stride}");
         $this->asm->rawLine("    mul {$offset}, {$idxResult->valor}, {$offset}");
-        $this->asm->rawLine("    ldr {$rd}, [{$arrResult->valor}, {$offset}]");
+
+        if ($thisDim < $totalDims) {
+            // Devolver puntero al sub-arreglo
+            $this->asm->rawLine("    add {$rd}, {$arrResult->valor}, {$offset}");
+        } else {
+            // Cargar el valor escalar
+            $this->asm->rawLine("    ldr {$rd}, [{$arrResult->valor}, {$offset}]");
+        }
 
         $this->asm->freeTemp($arrResult->valor);
         $this->asm->freeTemp($idxResult->valor);
         $this->asm->freeTemp($offset);
 
-        return Result::temp(Result::INT, $rd);
+        return Result::temp($this->goTypeToResultType($baseType), $rd);
     }
 
-    /** Genera el store para a[i] = valor */
+    /** Busca el tipo de un identificador en la tabla de símbolos */
+    private function lookupArrayType(string $id): string
+    {
+        foreach ($this->symTable->getAll() as $sym) {
+            if ($sym['id'] === $id) return $sym['type'];
+        }
+        return '[1]int32';   // fallback razonable
+    }
+
+    /**
+     * Genera "a[i][j]...[n] = valor" calculando el offset multidimensional.
+     */
     private function emitArrayStore(Context\IndexAccessContext $ctx, string $valReg): void
     {
-        $arrResult = $this->visit($ctx->expr(0));
-        $idxResult = $this->visit($ctx->expr(1));
+        // Calcular profundidad y dimensiones (igual que visitIndexAccess)
+        $depth   = 0;
+        $rootCtx = $ctx;
+        while ($rootCtx->expr(0) instanceof Context\IndexAccessContext) {
+            $depth++;
+            $rootCtx = $rootCtx->expr(0);
+        }
+        $rootName = $rootCtx->expr(0)->getText();
+        $rootType = $this->lookupArrayType($rootName);
+        [$dims, ] = $this->parseArrayType($rootType);
 
+        $thisDim   = $depth + 1;
+        $totalDims = count($dims);
+
+        // El visit del LHS (que es IndexAccess) nos devuelve la dirección final
+        // siempre que thisDim == totalDims (último nivel).
+        // Pero como queremos hacer STR, necesitamos obtener el puntero al sub-array
+        // en el penúltimo nivel y sumar el offset escalar.
+        $arrResult = $this->visit($ctx->expr(0));  // puntero al sub-arreglo
+        $idxResult = $this->visit($ctx->expr(1));
         if (!($arrResult instanceof Result) || !($idxResult instanceof Result)) return;
 
         $offset = $this->asm->getFreeTemp();
-        $this->asm->rawLine("    mov {$offset}, #8");
+
+        $stride = 8;
+        if ($thisDim < $totalDims) {
+            $remaining = array_slice($dims, $thisDim);
+            $stride    = $this->arrayTotalSize($remaining) * 8;
+        }
+
+        $this->asm->rawLine("    mov {$offset}, #{$stride}");
         $this->asm->rawLine("    mul {$offset}, {$idxResult->valor}, {$offset}");
         $this->asm->rawLine("    str {$valReg}, [{$arrResult->valor}, {$offset}]");
 
@@ -842,18 +1015,15 @@ class Compiler extends golampiBaseVisitor
     {
         $exprs = $ctx->exprList()?->expr() ?? [];
 
-        if (!empty($exprs)) {
-            $val = $this->visit($exprs[0]);
-            if ($val instanceof Result && $val->tipo !== Result::STRING) {
-                $this->asm->emitMov('x0', $val->valor);
-                $this->asm->freeTemp($val->valor);
-            }
-            // Múltiples retornos: segundo valor en x1
-            if (count($exprs) > 1) {
-                $val2 = $this->visit($exprs[1]);
-                if ($val2 instanceof Result && $val2->tipo !== Result::STRING) {
-                    $this->asm->emitMov('x1', $val2->valor);
-                    $this->asm->freeTemp($val2->valor);
+        // Múltiples retornos: x0, x1, x2, x3 (hasta 4 valores)
+        // Convención: el primer return va en x0, segundo en x1, etc.
+        foreach ($exprs as $i => $expr) {
+            if ($i >= 4) break;   // máximo 4 retornos en x0-x3
+            $val = $this->visit($expr);
+            if ($val instanceof Result) {
+                $this->asm->rawLine("    mov x{$i}, {$val->valor}");
+                if ($val->tipo !== Result::STRING) {
+                    $this->asm->freeTemp($val->valor);
                 }
             }
         }
@@ -957,6 +1127,11 @@ class Compiler extends golampiBaseVisitor
         // now()
         if ($callee === 'now') {
             return $this->emitNow();
+        }
+
+        // Casting de tipo: rune(x), int32(x), float32(x), bool(x), string(x)
+        if (in_array($callee, ['rune', 'int32', 'float32', 'bool', 'string'])) {
+            return $this->emitCast($callee, $ctx->exprList()?->expr() ?? []);
         }
 
         // Llamada a función de usuario
@@ -1084,45 +1259,82 @@ class Compiler extends golampiBaseVisitor
 
     private function emitSubstr(array $args): Result
     {
-        // substr(s, inicio, longitud)
-        // Implementación simplificada: devuelve un puntero desplazado al string original
-        if (count($args) < 2) {
+        if (count($args) < 3) {
             $label = $this->asm->addStringLiteral('""');
             return Result::temp(Result::STRING, $label);
         }
 
-        $strResult   = $this->visit($args[0]);  // string fuente (etiqueta)
-        $startResult = $this->visit($args[1]);  // índice inicial
+        $strResult   = $this->visit($args[0]);
+        $startResult = $this->visit($args[1]);
+        $lenResult   = $this->visit($args[2]);
 
-        $rd = $this->asm->getFreeTemp();
-
-        if ($strResult instanceof Result && $strResult->tipo === Result::STRING) {
-            // Cargar dirección base del string
-            $this->asm->emitLoadStringAddr($rd, $strResult->valor);
-            // Sumar el índice inicial para desplazar el puntero
-            if ($startResult instanceof Result) {
-                $this->asm->rawLine("    add {$rd}, {$rd}, {$startResult->valor}");
-                $this->asm->freeTemp($startResult->valor);
-            }
-            // Crear una etiqueta de string vacío como fallback del tipo
-            // pero devolvemos el registro con la dirección desplazada
-            // El fmt.Println de esta cadena usará el puntero directamente
-            // Nota: para imprimir necesitaríamos calcular la longitud también.
-            // Por ahora devolvemos la etiqueta original (limitación conocida).
-            $this->asm->freeTemp($rd);
-            return Result::temp(Result::STRING, $strResult->valor);
+        if (!($strResult instanceof Result) || !($startResult instanceof Result) || !($lenResult instanceof Result)) {
+            $label = $this->asm->addStringLiteral('""');
+            return Result::temp(Result::STRING, $label);
         }
 
-        $this->asm->freeTemp($rd);
-        $label = $this->asm->addStringLiteral('""');
-        return Result::temp(Result::STRING, $label);
+        // Cargar puntero base del string fuente en x0
+        $this->asm->emitLoadStringAddr('x0', $strResult->valor);
+        // x1 = inicio, x2 = longitud
+        $this->asm->rawLine("    mov x1, {$startResult->valor}");
+        $this->asm->rawLine("    mov x2, {$lenResult->valor}");
+        $this->asm->rawLine("    bl __substr");
+
+        if ($startResult->tipo !== Result::STRING) $this->asm->freeTemp($startResult->valor);
+        if ($lenResult->tipo   !== Result::STRING) $this->asm->freeTemp($lenResult->valor);
+
+        // El resultado es un puntero al buffer compartido __substr_buf
+        return Result::temp(Result::STRING, "__substr_buf");
     }
 
     private function emitNow(): Result
     {
-        // now() - devuelve string de fecha actual usando syscall clock_gettime
-        $label = $this->asm->addStringLiteral('"0000-00-00 00:00:00"');
-        return Result::temp(Result::STRING, $label);
+        // Llama a la rutina __now que rellena un buffer global con la fecha
+        // actual en formato YYYY-MM-DD HH:MM:SS y devuelve su dirección en x0.
+        $this->asm->rawLine("    bl __now");
+        // El resultado es un puntero a string en x0, lo dejamos como Result STRING
+        // pero el "valor" será la etiqueta especial __now_buf que el ASMGenerator
+        // reserva en .bss
+        return Result::temp(Result::STRING, "__now_buf");
+    }
+
+    /**
+     * Casting de tipo: rune(x), int32(x), float32(x), bool(x), string(x).
+     * En nuestro modelo de registros, la mayoría de casts entre tipos
+     * compatibles (int32, rune) son no-ops; solo cambiamos la etiqueta del Result.
+     */
+    private function emitCast(string $targetType, array $args): Result
+    {
+        if (empty($args)) return Result::buildVacio();
+        $val = $this->visit($args[0]);
+        if (!($val instanceof Result)) return Result::buildVacio();
+
+        $newType = match ($targetType) {
+            'int32'   => Result::INT,
+            'float32' => Result::FLOAT,
+            'bool'    => Result::BOOL,
+            'rune'    => Result::RUNE,
+            'string'  => Result::STRING,
+            default   => $val->tipo,
+        };
+
+        // int32 ↔ rune: mismo tamaño, sin conversión
+        // float32 ↔ int32: requiere fcvt - lo aproximamos
+        if ($val->tipo === Result::FLOAT && $newType === Result::INT) {
+            $rd = $this->asm->getFreeTemp();
+            $this->asm->rawLine("    fcvtzs {$rd}, {$val->valor}");
+            $this->asm->freeFloatTemp($val->valor);
+            return Result::temp(Result::INT, $rd);
+        }
+        if ($val->tipo === Result::INT && $newType === Result::FLOAT) {
+            $rd = $this->asm->getFreeFloatTemp();
+            $this->asm->rawLine("    scvtf {$rd}, {$val->valor}");
+            $this->asm->freeTemp($val->valor);
+            return Result::temp(Result::FLOAT, $rd);
+        }
+
+        // Cast trivial: solo cambiar la etiqueta del tipo
+        return Result::temp($newType, $val->valor);
     }
 
     // ═══════════════════════════════════════════════════════

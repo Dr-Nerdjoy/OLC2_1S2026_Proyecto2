@@ -212,16 +212,30 @@ class ASMGenerator
 
     /**
      * Imprime el string cuya etiqueta es $label.
-     * Usa x0=1(stdout), x1=ptr, x2=len, x8=64(write).
+     *  - Si el label tiene un "_len" asociado (string literal), lo usamos.
+     *  - Si no (buffers runtime como __now_buf, __substr_buf), llamamos a __strlen.
      */
     public function emitPrintString(string $label): void
     {
         $this->comment("print_string({$label})");
-        $this->body[] = "    adrp x1, {$label}";
-        $this->body[] = "    add  x1, x1, :lo12:{$label}";
-        $this->body[] = "    adrp x2, {$label}_len";
-        $this->body[] = "    add  x2, x2, :lo12:{$label}_len";
-        $this->body[] = "    ldr  x2, [x2]";
+        // Strings literales del programa tienen <label>_len
+        $isLiteral = isset($this->strings[$label]);
+
+        if ($isLiteral) {
+            $this->body[] = "    adrp x1, {$label}";
+            $this->body[] = "    add  x1, x1, :lo12:{$label}";
+            $this->body[] = "    adrp x2, {$label}_len";
+            $this->body[] = "    add  x2, x2, :lo12:{$label}_len";
+            $this->body[] = "    ldr  x2, [x2]";
+        } else {
+            // Buffer runtime: calcular longitud con __strlen
+            $this->body[] = "    adrp x0, {$label}";
+            $this->body[] = "    add  x0, x0, :lo12:{$label}";
+            $this->body[] = "    bl   __strlen";
+            $this->body[] = "    mov  x2, x0";          // longitud
+            $this->body[] = "    adrp x1, {$label}";
+            $this->body[] = "    add  x1, x1, :lo12:{$label}";
+        }
         $this->body[] = "    mov  x0, #1";
         $this->body[] = "    mov  x8, #64";
         $this->body[] = "    svc  #0";
@@ -266,10 +280,14 @@ class ASMGenerator
 
         // ---- .data ----------------------------------------
         $out .= ".section .data\n";
-        $out .= "__newline:  .byte 10\n";
-        $out .= "__space:    .byte 32\n";
-        $out .= "__minus:    .byte 45\n";
-        $out .= "__buf:      .skip 32\n\n";
+        $out .= "__newline:    .byte 10\n";
+        $out .= "__space:      .byte 32\n";
+        $out .= "__minus:      .byte 45\n";
+        $out .= "__buf:        .skip 32\n";
+        // Buffers para now() y substr()
+        $out .= "__now_buf:    .skip 32\n";   // 'YYYY-MM-DD HH:MM:SS' + \0
+        $out .= "__substr_buf: .skip 256\n";  // hasta 256 bytes
+        $out .= "__time_buf:   .skip 16\n\n"; // timespec
 
         // Strings del programa
         foreach ($this->strings as $label => $inner) {
@@ -419,6 +437,305 @@ class ASMGenerator
         $r .= "__sl_done:\n";
         $r .= "    ldr x19, [sp, #16]\n";
         $r .= "    ldp x29, x30, [sp], #32\n";
+        $r .= "    ret\n\n";
+
+        // ---- __substr ----------------------------------------
+        // Args: x0=ptr fuente, x1=inicio, x2=longitud
+        // Copia substring a __substr_buf y devuelve x0=__substr_buf
+        $r .= "__substr:\n";
+        $r .= "    stp x29, x30, [sp, #-32]!\n";
+        $r .= "    mov x29, sp\n";
+        $r .= "    str x19, [sp, #16]\n";
+        $r .= "    str x20, [sp, #24]\n";
+        $r .= "    add x0, x0, x1\n";              // ptr fuente += inicio
+        $r .= "    adrp x19, __substr_buf\n";
+        $r .= "    add  x19, x19, :lo12:__substr_buf\n";
+        $r .= "    mov x20, x19\n";                // guardar ptr destino
+        $r .= "    mov x3, #0\n";                  // contador
+        $r .= "__sub_loop:\n";
+        $r .= "    cmp x3, x2\n";
+        $r .= "    b.ge __sub_done\n";
+        $r .= "    ldrb w4, [x0, x3]\n";
+        $r .= "    cbz w4, __sub_done\n";          // null terminator del fuente
+        $r .= "    strb w4, [x19, x3]\n";
+        $r .= "    add x3, x3, #1\n";
+        $r .= "    b __sub_loop\n";
+        $r .= "__sub_done:\n";
+        $r .= "    mov w5, #0\n";
+        $r .= "    strb w5, [x19, x3]\n";          // null-terminator
+        $r .= "    mov x0, x20\n";                 // devolver ptr al buffer
+        $r .= "    ldr x19, [sp, #16]\n";
+        $r .= "    ldr x20, [sp, #24]\n";
+        $r .= "    ldp x29, x30, [sp], #32\n";
+        $r .= "    ret\n\n";
+
+        // ---- __now ------------------------------------------------
+        // Llama a clock_gettime + gmtime simplificado.
+        // Devuelve x0 = ptr a __now_buf con formato YYYY-MM-DD HH:MM:SS\0
+        $r .= "__now:\n";
+        $r .= "    stp x29, x30, [sp, #-32]!\n";
+        $r .= "    mov x29, sp\n";
+        $r .= "    str x19, [sp, #16]\n";
+        // syscall clock_gettime(CLOCK_REALTIME=0, &timespec)
+        $r .= "    mov x0, #0\n";
+        $r .= "    adrp x1, __time_buf\n";
+        $r .= "    add  x1, x1, :lo12:__time_buf\n";
+        $r .= "    mov x8, #113\n";                // SYS_clock_gettime
+        $r .= "    svc #0\n";
+        // Cargar segundos (tv_sec) en x19
+        $r .= "    adrp x1, __time_buf\n";
+        $r .= "    add  x1, x1, :lo12:__time_buf\n";
+        $r .= "    ldr x19, [x1]\n";
+        // Convertir epoch a YYYY-MM-DD HH:MM:SS (algoritmo simplificado)
+        // Para no implementar gmtime completo, llamamos a __format_epoch
+        $r .= "    mov x0, x19\n";
+        $r .= "    bl __format_epoch\n";
+        // x0 ya apunta a __now_buf
+        $r .= "    ldr x19, [sp, #16]\n";
+        $r .= "    ldp x29, x30, [sp], #32\n";
+        $r .= "    ret\n\n";
+
+        // ---- __format_epoch ---------------------------------------
+        // x0 = epoch seconds (UTC)
+        // Llena __now_buf con "YYYY-MM-DD HH:MM:SS\0" y deja x0=ptr buf
+        // Algoritmo: división sucesiva. Soporta 1970-2099.
+        $r .= "__format_epoch:\n";
+        $r .= "    stp x29, x30, [sp, #-80]!\n";
+        $r .= "    mov x29, sp\n";
+        $r .= "    str x19, [sp, #16]\n";
+        $r .= "    str x20, [sp, #24]\n";
+        $r .= "    str x21, [sp, #32]\n";
+        $r .= "    str x22, [sp, #40]\n";
+        $r .= "    str x23, [sp, #48]\n";
+        $r .= "    str x24, [sp, #56]\n";
+        $r .= "    str x25, [sp, #64]\n";
+        // x19 = total_secs
+        $r .= "    mov x19, x0\n";
+        // segundos del día = total % 86400
+        $r .= "    mov x9, #86400\n";
+        $r .= "    udiv x10, x19, x9\n";          // x10 = días desde epoch
+        $r .= "    msub x20, x10, x9, x19\n";     // x20 = secs del día
+        // x21 = horas, x22 = minutos, x23 = segundos
+        $r .= "    mov x9, #3600\n";
+        $r .= "    udiv x21, x20, x9\n";
+        $r .= "    msub x11, x21, x9, x20\n";     // x11 = secs - horas*3600
+        $r .= "    mov x9, #60\n";
+        $r .= "    udiv x22, x11, x9\n";
+        $r .= "    msub x23, x22, x9, x11\n";
+        // Calcular año, mes, día desde x10 (días desde 1970-01-01)
+        // Año = 1970, restamos años bisiestos / regulares
+        $r .= "    mov x24, #1970\n";             // año
+        $r .= "__fe_year_loop:\n";
+        // Determinar si año bisiesto: (año%4==0 && año%100!=0) || año%400==0
+        $r .= "    mov x9, #4\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";    // x11 = año%4
+        $r .= "    cbnz x11, __fe_not_leap\n";
+        $r .= "    mov x9, #100\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";
+        $r .= "    cbnz x11, __fe_leap\n";
+        $r .= "    mov x9, #400\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";
+        $r .= "    cbnz x11, __fe_not_leap\n";
+        $r .= "__fe_leap:\n";
+        $r .= "    mov x9, #366\n";
+        $r .= "    b __fe_check_year\n";
+        $r .= "__fe_not_leap:\n";
+        $r .= "    mov x9, #365\n";
+        $r .= "__fe_check_year:\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_year_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x24, x24, #1\n";
+        $r .= "    b __fe_year_loop\n";
+        $r .= "__fe_year_done:\n";
+        // Ahora x10 = días dentro del año (0-365), x24 = año
+        // Calcular mes y día. Usamos tabla de días por mes (excepto febrero).
+        $r .= "    mov x25, #1\n";                // mes = 1
+        // Para febrero usamos 28 o 29 según leap.
+        // Recargar leap flag: si año actual es bisiesto, feb tiene 29.
+        $r .= "    mov x9, #4\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";
+        $r .= "    cbnz x11, __fe_feb28\n";
+        $r .= "    mov x9, #100\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";
+        $r .= "    cbnz x11, __fe_feb29\n";
+        $r .= "    mov x9, #400\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x11, x11, x9, x24\n";
+        $r .= "    cbnz x11, __fe_feb28\n";
+        $r .= "__fe_feb29:\n";
+        $r .= "    mov x12, #29\n";
+        $r .= "    b __fe_months\n";
+        $r .= "__fe_feb28:\n";
+        $r .= "    mov x12, #28\n";
+        $r .= "__fe_months:\n";
+        // Tabla de días por mes (en x9). Iteramos.
+        // Enero=31, Febrero=x12, Marzo=31, Abril=30, Mayo=31, Junio=30,
+        // Julio=31, Agosto=31, Septiembre=30, Octubre=31, Noviembre=30, Diciembre=31
+        // Ene
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Feb (x12)
+        $r .= "    cmp x10, x12\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x12\n";
+        $r .= "    add x25, x25, #1\n";
+        // Mar
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Abr
+        $r .= "    mov x9, #30\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // May
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Jun
+        $r .= "    mov x9, #30\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Jul
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Ago
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Sep
+        $r .= "    mov x9, #30\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Oct
+        $r .= "    mov x9, #31\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        // Nov
+        $r .= "    mov x9, #30\n";
+        $r .= "    cmp x10, x9\n";
+        $r .= "    b.lt __fe_day_done\n";
+        $r .= "    sub x10, x10, x9\n";
+        $r .= "    add x25, x25, #1\n";
+        $r .= "__fe_day_done:\n";
+        // Día = x10 + 1
+        $r .= "    add x10, x10, #1\n";
+        // Ahora escribimos en __now_buf:
+        // 0123456789012345678
+        // YYYY-MM-DD HH:MM:SS\0
+        $r .= "    adrp x1, __now_buf\n";
+        $r .= "    add  x1, x1, :lo12:__now_buf\n";
+        // Año (4 dígitos): x24 → bytes 0,1,2,3
+        $r .= "    mov x9, #1000\n";
+        $r .= "    udiv x11, x24, x9\n";
+        $r .= "    msub x12, x11, x9, x24\n";    // resto
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #0]\n";
+        $r .= "    mov x9, #100\n";
+        $r .= "    udiv x11, x12, x9\n";
+        $r .= "    msub x13, x11, x9, x12\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #1]\n";
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x13, x9\n";
+        $r .= "    msub x14, x11, x9, x13\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #2]\n";
+        $r .= "    add w14, w14, #48\n";
+        $r .= "    strb w14, [x1, #3]\n";
+        // '-'
+        $r .= "    mov w11, #45\n";
+        $r .= "    strb w11, [x1, #4]\n";
+        // Mes (2 dígitos): x25
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x25, x9\n";
+        $r .= "    msub x12, x11, x9, x25\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #5]\n";
+        $r .= "    add w12, w12, #48\n";
+        $r .= "    strb w12, [x1, #6]\n";
+        // '-'
+        $r .= "    mov w11, #45\n";
+        $r .= "    strb w11, [x1, #7]\n";
+        // Día: x10
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x10, x9\n";
+        $r .= "    msub x12, x11, x9, x10\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #8]\n";
+        $r .= "    add w12, w12, #48\n";
+        $r .= "    strb w12, [x1, #9]\n";
+        // ' '
+        $r .= "    mov w11, #32\n";
+        $r .= "    strb w11, [x1, #10]\n";
+        // Hora: x21
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x21, x9\n";
+        $r .= "    msub x12, x11, x9, x21\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #11]\n";
+        $r .= "    add w12, w12, #48\n";
+        $r .= "    strb w12, [x1, #12]\n";
+        // ':'
+        $r .= "    mov w11, #58\n";
+        $r .= "    strb w11, [x1, #13]\n";
+        // Min: x22
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x22, x9\n";
+        $r .= "    msub x12, x11, x9, x22\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #14]\n";
+        $r .= "    add w12, w12, #48\n";
+        $r .= "    strb w12, [x1, #15]\n";
+        // ':'
+        $r .= "    mov w11, #58\n";
+        $r .= "    strb w11, [x1, #16]\n";
+        // Seg: x23
+        $r .= "    mov x9, #10\n";
+        $r .= "    udiv x11, x23, x9\n";
+        $r .= "    msub x12, x11, x9, x23\n";
+        $r .= "    add w11, w11, #48\n";
+        $r .= "    strb w11, [x1, #17]\n";
+        $r .= "    add w12, w12, #48\n";
+        $r .= "    strb w12, [x1, #18]\n";
+        // null-terminator
+        $r .= "    mov w11, #0\n";
+        $r .= "    strb w11, [x1, #19]\n";
+        // Devolver ptr al buffer
+        $r .= "    mov x0, x1\n";
+        $r .= "    ldr x19, [sp, #16]\n";
+        $r .= "    ldr x20, [sp, #24]\n";
+        $r .= "    ldr x21, [sp, #32]\n";
+        $r .= "    ldr x22, [sp, #40]\n";
+        $r .= "    ldr x23, [sp, #48]\n";
+        $r .= "    ldr x24, [sp, #56]\n";
+        $r .= "    ldr x25, [sp, #64]\n";
+        $r .= "    ldp x29, x30, [sp], #80\n";
         $r .= "    ret\n\n";
 
         // ---- Dato auxiliar ----
