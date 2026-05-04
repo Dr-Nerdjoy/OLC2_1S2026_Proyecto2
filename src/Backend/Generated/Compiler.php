@@ -1145,8 +1145,9 @@ class Compiler extends golampiBaseVisitor
             return null;
         }
 
+        // De derecha a izquierda.
         // Evaluar argumentos → x0, x1, ...
-        $args = $ctx->exprList()?->expr() ?? [];
+     /*   $args = $ctx->exprList()?->expr() ?? [];
         foreach ($args as $i => $argExpr) {
             $r = $this->visit($argExpr);
             if ($r instanceof Result) {
@@ -1154,6 +1155,29 @@ class Compiler extends golampiBaseVisitor
                 if ($r->tipo !== Result::STRING) $this->asm->freeTemp($r->valor);
             }
         }
+        $this->asm->rawLine("    bl {$callee}");
+*/
+    
+        // De derecha a izquierda:
+        $args = $ctx->exprList()?->expr() ?? [];
+        $tempRegs = [];
+        //Evaluar de derecha a izquierda y guardar resultado en temporal
+        for ($i = count($args) - 1; $i >= 0; $i--) {
+            $r = $this->visit($args[$i]);
+            if ($r instanceof Result) {
+                $tempRegs[$i] = $r;
+            }
+        }
+        ksort($tempRegs);
+        
+        //Paso los argumentos a x0, x1,x2... en su posicion original
+        foreach ($tempRegs as $i => $res) {
+            $this->asm->rawLine("    mov x{$i}, {$res->valor}");
+            if ($res->tipo !== Result::STRING) {
+                $this->asm->freeTemp($res->valor);
+            }
+        }
+
         $this->asm->rawLine("    bl {$callee}");
 
         // Determinar tipo de retorno
